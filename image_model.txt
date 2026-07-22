@@ -9,7 +9,8 @@ black-forest-labs/flux.2-pro
 bytedance-seed/seedream-4.5
 google/gemini-2.5-flash-image
 google/gemini-3-pro-image
-google/gemini-3.1-flash-image-preview
+google/gemini-3.1-flash-lite-image
+google/gemini-3.1-flash-image
 krea/krea-2-large
 krea/krea-2-medium
 krea/krea-2-medium-turbo
