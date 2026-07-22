@@ -16,6 +16,7 @@ import folder_paths
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OUTPUT_SUBDIR = "openrouter"
 DEFAULT_TIMEOUT = 600
+DEFAULT_TEXT_TIMEOUT = 60
 COMPONENT_DIR = Path(__file__).resolve().parent
 MODEL_FILE_FALLBACKS = {
     "text_model.txt": ["openai/gpt-4o-mini"],
@@ -96,7 +97,7 @@ def _parse_json_object(value: str, field_name: str) -> dict[str, Any] | None:
     return parsed
 
 
-def _tensor_to_data_url(image, image_format: str = "png") -> str:
+def _tensor_to_data_urls(image, image_format: str = "png") -> list[str]:
     try:
         import numpy as np
         from PIL import Image
@@ -106,14 +107,21 @@ def _tensor_to_data_url(image, image_format: str = "png") -> str:
     if image is None:
         raise RuntimeError("image reference is missing.")
 
-    img = image[0] if getattr(image, "ndim", None) == 4 else image
-    arr = img.detach().cpu().numpy()
-    arr = (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
-    pil = Image.fromarray(arr)
-    buffer = io.BytesIO()
-    pil.save(buffer, format=image_format.upper())
-    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
-    return f"data:image/{image_format};base64,{encoded}"
+    images = image if getattr(image, "ndim", None) == 4 else image[None,]
+    urls = []
+    for img in images:
+        arr = img.detach().cpu().numpy()
+        arr = (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
+        pil = Image.fromarray(arr)
+        buffer = io.BytesIO()
+        pil.save(buffer, format=image_format.upper())
+        encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        urls.append(f"data:image/{image_format};base64,{encoded}")
+    return urls
+
+
+def _image_reference_payloads(image, image_format: str = "png") -> list[dict[str, Any]]:
+    return [{"type": "image_url", "image_url": {"url": url}} for url in _tensor_to_data_urls(image, image_format)]
 
 
 def _b64_image_to_tensor(b64_json: str):
@@ -150,10 +158,12 @@ class OpenRouterText:
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
                 "system_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "max_tokens": ("INT", {"default": 1024, "min": 1, "max": 200000}),
+                "max_tokens": ("INT", {"default": 512, "min": 1, "max": 200000}),
+                "timeout_seconds": ("INT", {"default": DEFAULT_TEXT_TIMEOUT, "min": 5, "max": 600}),
                 "api_key": ("STRING", {"default": "", "password": True}),
             },
             "optional": {
+                "provider_json": ("STRING", {"multiline": True, "default": ""}),
                 "extra_body_json": ("STRING", {"multiline": True, "default": ""}),
             },
         }
@@ -163,7 +173,18 @@ class OpenRouterText:
     FUNCTION = "generate"
     CATEGORY = "OpenRouter"
 
-    def generate(self, model, prompt, system_prompt, temperature, max_tokens, api_key, extra_body_json=""):
+    def generate(
+        self,
+        model,
+        prompt,
+        system_prompt,
+        temperature,
+        max_tokens,
+        timeout_seconds,
+        api_key,
+        provider_json="",
+        extra_body_json="",
+    ):
         messages = []
         if system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt})
@@ -175,11 +196,20 @@ class OpenRouterText:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        provider = _parse_json_object(provider_json, "provider_json")
+        if provider:
+            payload["provider"] = provider
         extra = _parse_json_object(extra_body_json, "extra_body_json")
         if extra:
             payload.update(extra)
 
-        data = _chat_text(payload, api_key, DEFAULT_TIMEOUT)
+        try:
+            data = _chat_text(payload, api_key, timeout_seconds)
+        except requests.Timeout as exc:
+            raise RuntimeError(
+                f"OpenRouter text request timed out after {timeout_seconds}s. "
+                "Choose a faster model/provider, reduce max_tokens, or increase timeout_seconds."
+            ) from exc
         text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         return (text or "", json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -243,9 +273,7 @@ class OpenRouterImage:
         if seed >= 0:
             payload["seed"] = seed
         if reference_image is not None:
-            payload["input_references"] = [
-                {"type": "image_url", "image_url": {"url": _tensor_to_data_url(reference_image, output_format)}}
-            ]
+            payload["input_references"] = _image_reference_payloads(reference_image, output_format)
 
         provider = _parse_json_object(provider_json, "provider_json")
         if provider:
@@ -327,13 +355,16 @@ class OpenRouterVideo:
             "duration": duration,
         }
         if first_frame_image is not None:
+            references = _image_reference_payloads(first_frame_image, "png")
             payload["frame_images"] = [
                 {
                     "type": "image_url",
-                    "image_url": {"url": _tensor_to_data_url(first_frame_image, "png")},
+                    "image_url": references[0]["image_url"],
                     "frame_type": "first_frame",
                 }
             ]
+            if len(references) > 1:
+                payload["input_references"] = references[1:]
         provider = _parse_json_object(provider_json, "provider_json")
         if provider:
             payload["provider"] = provider
