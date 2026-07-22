@@ -16,13 +16,15 @@ import folder_paths
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OUTPUT_SUBDIR = "openrouter"
 DEFAULT_TIMEOUT = 600
-DEFAULT_TEXT_TIMEOUT = 60
+TEXT_REQUEST_TIMEOUT = 60
+VIDEO_MAX_WAIT_SECONDS = 900
 COMPONENT_DIR = Path(__file__).resolve().parent
 MODEL_FILE_FALLBACKS = {
     "text_model.txt": ["openai/gpt-4o-mini"],
     "image_model.txt": ["openai/gpt-image-1"],
     "video_model.txt": ["google/veo-3.1"],
-    "audio_model.txt": ["openai/gpt-4o-mini-tts-2025-12-15"],
+    "audio_model.txt": ["openai/gpt-audio-mini"],
+    "speech_model.txt": ["google/gemini-3.1-flash-tts-preview"],
 }
 
 
@@ -138,6 +140,69 @@ def _b64_image_to_tensor(b64_json: str):
     return torch.from_numpy(arr)[None,]
 
 
+def _video_from_path(path: str):
+    try:
+        from comfy_api.latest import InputImpl
+    except Exception as exc:
+        raise RuntimeError("ComfyUI video support is required to return VIDEO output.") from exc
+    return InputImpl.VideoFromFile(path)
+
+
+def _audio_from_path(path: str, response_format: str, pcm_sample_rate: int):
+    if response_format == "pcm":
+        try:
+            import torch
+        except Exception as exc:
+            raise RuntimeError("torch is required to convert raw PCM to ComfyUI AUDIO output.") from exc
+
+        raw = Path(path).read_bytes()
+        if len(raw) % 2:
+            raw = raw[:-1]
+        samples = torch.frombuffer(bytearray(raw), dtype=torch.int16).to(torch.float32) / 32768.0
+        waveform = samples.reshape(1, 1, -1)
+        return {"waveform": waveform, "sample_rate": int(pcm_sample_rate)}
+
+    try:
+        from comfy_extras.nodes_audio import load
+    except Exception as exc:
+        raise RuntimeError("ComfyUI audio loader is required to return AUDIO output.") from exc
+
+    waveform, sample_rate = load(path)
+    return {"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}
+
+
+def _extract_audio_payload(data: dict[str, Any]) -> tuple[str, str, str]:
+    message = data.get("choices", [{}])[0].get("message", {})
+    audio = message.get("audio")
+    if isinstance(audio, dict):
+        b64_audio = audio.get("data") or audio.get("b64_json") or audio.get("base64")
+        fmt = audio.get("format") or audio.get("mime_type") or audio.get("media_type") or "mp3"
+        generation_id = audio.get("id") or data.get("id") or ""
+        if b64_audio:
+            return b64_audio, str(fmt), str(generation_id)
+
+    for key in ("audio", "data", "b64_json", "base64"):
+        value = message.get(key)
+        if isinstance(value, str):
+            return value, "mp3", str(data.get("id", ""))
+
+    raise RuntimeError(f"OpenRouter audio response did not include base64 audio data: {data}")
+
+
+def _format_to_ext_and_loader_format(fmt: str, fallback: str = "mp3") -> tuple[str, str]:
+    value = (fmt or fallback).lower().strip()
+    if "mpeg" in value or value.endswith("mp3"):
+        return ".mp3", "mp3"
+    if "wav" in value or "wave" in value:
+        return ".wav", "wav"
+    if "pcm" in value:
+        return ".pcm", "pcm"
+    if "opus" in value:
+        return ".opus", "opus"
+    ext = _safe_ext_from_mime(value, f".{fallback}")
+    return ext, ext.lstrip(".")
+
+
 def _chat_text(payload: dict[str, Any], api_key: str, timeout: int) -> dict[str, Any]:
     response = requests.post(
         f"{OPENROUTER_BASE_URL}/chat/completions",
@@ -159,7 +224,7 @@ class OpenRouterText:
                 "system_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "max_tokens": ("INT", {"default": 512, "min": 1, "max": 200000}),
-                "timeout_seconds": ("INT", {"default": DEFAULT_TEXT_TIMEOUT, "min": 5, "max": 600}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
                 "api_key": ("STRING", {"default": "", "password": True}),
             },
             "optional": {
@@ -180,7 +245,7 @@ class OpenRouterText:
         system_prompt,
         temperature,
         max_tokens,
-        timeout_seconds,
+        seed,
         api_key,
         provider_json="",
         extra_body_json="",
@@ -204,11 +269,11 @@ class OpenRouterText:
             payload.update(extra)
 
         try:
-            data = _chat_text(payload, api_key, timeout_seconds)
+            data = _chat_text(payload, api_key, TEXT_REQUEST_TIMEOUT)
         except requests.Timeout as exc:
             raise RuntimeError(
-                f"OpenRouter text request timed out after {timeout_seconds}s. "
-                "Choose a faster model/provider, reduce max_tokens, or increase timeout_seconds."
+                f"OpenRouter text request timed out after {TEXT_REQUEST_TIMEOUT}s. "
+                "Choose a faster model/provider or reduce max_tokens."
             ) from exc
         text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         return (text or "", json.dumps(data, ensure_ascii=False, indent=2))
@@ -317,8 +382,8 @@ class OpenRouterVideo:
                 "resolution": ("STRING", {"default": "720p"}),
                 "aspect_ratio": ("STRING", {"default": "16:9"}),
                 "duration": ("INT", {"default": 5, "min": 1, "max": 60}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
                 "poll_interval_seconds": ("INT", {"default": 5, "min": 1, "max": 60}),
-                "max_wait_seconds": ("INT", {"default": 900, "min": 30, "max": 7200}),
                 "api_key": ("STRING", {"default": "", "password": True}),
             },
             "optional": {
@@ -328,8 +393,8 @@ class OpenRouterVideo:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("video_path", "job_id", "raw_json")
+    RETURN_TYPES = ("VIDEO", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("video", "video_path", "job_id", "raw_json")
     FUNCTION = "generate"
     CATEGORY = "OpenRouter"
 
@@ -340,8 +405,8 @@ class OpenRouterVideo:
         resolution,
         aspect_ratio,
         duration,
+        seed,
         poll_interval_seconds,
-        max_wait_seconds,
         api_key,
         first_frame_image=None,
         provider_json="",
@@ -385,7 +450,7 @@ class OpenRouterVideo:
         if not job_id or not polling_url:
             raise RuntimeError(f"OpenRouter video response did not include job id/polling_url: {job}")
 
-        deadline = time.time() + max_wait_seconds
+        deadline = time.time() + VIDEO_MAX_WAIT_SECONDS
         current = job
         while time.time() < deadline:
             status = current.get("status")
@@ -400,7 +465,8 @@ class OpenRouterVideo:
                 ext = _safe_ext_from_mime(content_type, ".mp4")
                 path = _unique_path("video", ext)
                 path.write_bytes(video_response.content)
-                return (str(path), str(job_id), json.dumps(current, ensure_ascii=False, indent=2))
+                video_path = str(path)
+                return (_video_from_path(video_path), video_path, str(job_id), json.dumps(current, ensure_ascii=False, indent=2))
             if status in {"failed", "cancelled", "expired"}:
                 raise RuntimeError(f"OpenRouter video job ended with status {status}: {current}")
             time.sleep(poll_interval_seconds)
@@ -408,19 +474,23 @@ class OpenRouterVideo:
             _raise_for_response(poll_response)
             current = poll_response.json()
 
-        raise RuntimeError(f"OpenRouter video job timed out after {max_wait_seconds}s: {current}")
+        raise RuntimeError(f"OpenRouter video job timed out after {VIDEO_MAX_WAIT_SECONDS}s: {current}")
 
 
-class OpenRouterTTSAudio:
+class OpenRouterAudio:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "model": (_model_choices("audio_model.txt"),),
-                "input_text": ("STRING", {"multiline": True, "default": ""}),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "system_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "voice": ("STRING", {"default": "alloy"}),
-                "response_format": (["mp3", "pcm"], {"default": "mp3"}),
-                "speed": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 4.0, "step": 0.05}),
+                "response_format": (["mp3", "wav", "pcm"], {"default": "mp3"}),
+                "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "max_tokens": ("INT", {"default": 512, "min": 1, "max": 200000}),
+                "pcm_sample_rate": ("INT", {"default": 24000, "min": 8000, "max": 192000}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
                 "api_key": ("STRING", {"default": "", "password": True}),
             },
             "optional": {
@@ -429,12 +499,88 @@ class OpenRouterTTSAudio:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("audio_path", "generation_id")
+    RETURN_TYPES = ("AUDIO", "STRING", "STRING")
+    RETURN_NAMES = ("audio", "audio_path", "generation_id")
     FUNCTION = "generate"
     CATEGORY = "OpenRouter"
 
-    def generate(self, model, input_text, voice, response_format, speed, api_key, provider_json="", extra_body_json=""):
+    def generate(
+        self,
+        model,
+        prompt,
+        system_prompt,
+        voice,
+        response_format,
+        temperature,
+        max_tokens,
+        pcm_sample_rate,
+        seed,
+        api_key,
+        provider_json="",
+        extra_body_json="",
+    ):
+        messages = []
+        if system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "modalities": ["text", "audio"],
+            "audio": {"voice": voice, "format": response_format},
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        provider = _parse_json_object(provider_json, "provider_json")
+        if provider:
+            payload["provider"] = provider
+        extra = _parse_json_object(extra_body_json, "extra_body_json")
+        if extra:
+            payload.update(extra)
+
+        try:
+            data = _chat_text(payload, api_key, TEXT_REQUEST_TIMEOUT)
+        except requests.Timeout as exc:
+            raise RuntimeError(
+                f"OpenRouter audio request timed out after {TEXT_REQUEST_TIMEOUT}s. "
+                "Choose a faster model/provider or reduce max_tokens."
+            ) from exc
+
+        b64_audio, fmt, generation_id = _extract_audio_payload(data)
+        ext, loader_format = _format_to_ext_and_loader_format(fmt, response_format)
+        path = _unique_path("audio", ext)
+        path.write_bytes(base64.b64decode(b64_audio))
+        audio_path = str(path)
+        return (_audio_from_path(audio_path, loader_format, pcm_sample_rate), audio_path, generation_id)
+
+
+class OpenRouterSpeech:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": (_model_choices("speech_model.txt"),),
+                "input_text": ("STRING", {"multiline": True, "default": ""}),
+                "voice": ("STRING", {"default": "alloy"}),
+                "response_format": (["mp3", "pcm"], {"default": "mp3"}),
+                "speed": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 4.0, "step": 0.05}),
+                "pcm_sample_rate": ("INT", {"default": 24000, "min": 8000, "max": 192000}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
+                "api_key": ("STRING", {"default": "", "password": True}),
+            },
+            "optional": {
+                "provider_json": ("STRING", {"multiline": True, "default": ""}),
+                "extra_body_json": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO", "STRING", "STRING")
+    RETURN_NAMES = ("audio", "audio_path", "generation_id")
+    FUNCTION = "generate"
+    CATEGORY = "OpenRouter"
+
+    def generate(self, model, input_text, voice, response_format, speed, pcm_sample_rate, seed, api_key, provider_json="", extra_body_json=""):
         payload: dict[str, Any] = {
             "model": model,
             "input": input_text,
@@ -459,19 +605,22 @@ class OpenRouterTTSAudio:
         ext = ".mp3" if response_format == "mp3" else ".pcm"
         path = _unique_path("audio", ext)
         path.write_bytes(response.content)
-        return (str(path), response.headers.get("X-Generation-Id", ""))
+        audio_path = str(path)
+        return (_audio_from_path(audio_path, response_format, pcm_sample_rate), audio_path, response.headers.get("X-Generation-Id", ""))
 
 
 NODE_CLASS_MAPPINGS = {
     "OpenRouterText": OpenRouterText,
     "OpenRouterImage": OpenRouterImage,
     "OpenRouterVideo": OpenRouterVideo,
-    "OpenRouterTTSAudio": OpenRouterTTSAudio,
+    "OpenRouterTTSAudio": OpenRouterAudio,
+    "OpenRouterSpeech": OpenRouterSpeech,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OpenRouterText": "OpenRouter Text",
     "OpenRouterImage": "OpenRouter Image",
     "OpenRouterVideo": "OpenRouter Video",
-    "OpenRouterTTSAudio": "OpenRouter TTS Audio",
+    "OpenRouterTTSAudio": "OpenRouter Audio",
+    "OpenRouterSpeech": "OpenRouter Speech",
 }

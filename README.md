@@ -1,6 +1,6 @@
 # ComfyUI OpenRouter Media Nodes
 
-Custom ComfyUI nodes for OpenRouter text, image, video, and text-to-speech generation.
+Custom ComfyUI nodes for OpenRouter text, image, video, audio, and speech generation.
 
 ## Setup
 
@@ -22,8 +22,9 @@ ComfyUI/output/openrouter/
 
 - `OpenRouter Text`: calls `/api/v1/chat/completions`, returns text and raw JSON.
 - `OpenRouter Image`: calls `/api/v1/images`, returns a ComfyUI `IMAGE`, file path, and raw JSON.
-- `OpenRouter Video`: calls `/api/v1/videos`, polls the async job, downloads the first completed video, and returns the file path.
-- `OpenRouter TTS Audio`: calls `/api/v1/audio/speech`, saves `mp3` or `pcm`, and returns the file path.
+- `OpenRouter Video`: calls `/api/v1/videos`, polls the async job, downloads the first completed video, and returns `VIDEO` plus the saved file path.
+- `OpenRouter Audio`: uses OpenRouter audio-output models through `/api/v1/chat/completions`, saves audio, and returns `AUDIO` plus the saved file path.
+- `OpenRouter Speech`: calls `/api/v1/audio/speech`, saves `mp3` or `pcm`, and returns `AUDIO` plus the saved file path.
 
 Use `provider_json` and `extra_body_json` for model/provider-specific options.
 
@@ -35,5 +36,6 @@ Model dropdowns are loaded from text files in this custom node folder:
 - `image_model.txt`
 - `video_model.txt`
 - `audio_model.txt`
+- `speech_model.txt`
 
 Write one OpenRouter model id per line. Blank lines and lines starting with `#` are ignored.

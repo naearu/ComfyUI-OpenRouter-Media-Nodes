@@ -1,0 +1,14 @@
+# One OpenRouter speech model id per line.
+# Edit this file, then restart ComfyUI or refresh node definitions.
+google/gemini-3.1-flash-tts-preview
+hexgrad/kokoro-82m
+x-ai/grok-voice-tts-1.0
+microsoft/mai-voice-2
+deepgram/aura-2
+mistralai/voxtral-mini-tts-2603
+minimax/speech-2.8-hd
+minimax/speech-2.8-turbo
+canopylabs/orpheus-3b-0.1-ft
+sesame/csm-1b
+zyphra/zonos-v0.1-hybrid
+zyphra/zonos-v0.1-transformer
