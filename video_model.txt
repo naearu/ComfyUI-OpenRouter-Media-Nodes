@@ -1,0 +1,13 @@
+# One OpenRouter video generation model id per line.
+# Edit this file, then restart ComfyUI or refresh node definitions.
+x-ai/grok-imagine-video-1.5
+alibaba/happyhorse-1.1
+alibaba/happyhorse-1.0
+x-ai/grok-imagine-video
+kwaivgi/kling-v3.0-pro
+kwaivgi/kling-v3.0-std
+google/veo-3.1-fast
+google/veo-3.1-lite
+kwaivgi/kling-video-o1
+minimax/hailuo-2.3
+google/veo-3.1

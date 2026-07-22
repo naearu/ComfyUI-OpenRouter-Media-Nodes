@@ -1,0 +1,12 @@
+# One OpenRouter image generation model id per line.
+# Edit this file, then restart ComfyUI or refresh node definitions.
+krea/krea-2-large
+krea/krea-2-medium
+krea/krea-2-medium-turbo
+openrouter/auto-beta
+google/gemini-3.1-flash-lite-image
+openai/gpt-image-2
+openai/gpt-image-1-mini
+openai/gpt-image-1
+google/gemini-3.1-flash-image
+google/gemini-3-pro-image

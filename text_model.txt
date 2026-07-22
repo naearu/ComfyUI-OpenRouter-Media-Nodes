@@ -1,0 +1,13 @@
+# One OpenRouter text model id per line.
+# Edit this file, then restart ComfyUI or refresh node definitions.
+xiaomi/mimo-v2.5
+deepseek/deepseek-v4-flash
+z-ai/glm-5.2
+minimax/minimax-m3
+deepseek/deepseek-v4-pro
+nvidia/nemotron-3-ultra-550b-a55b:free
+anthropic/claude-opus-4.8
+anthropic/claude-opus-4.7
+anthropic/claude-sonnet-5
+stepfun/step-3.7-flash
+openai/gpt-4o-mini
