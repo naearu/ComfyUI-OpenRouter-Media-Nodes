@@ -228,6 +228,7 @@ class OpenRouterText:
                 "api_key": ("STRING", {"default": "", "password": True}),
             },
             "optional": {
+                "reference_image": ("IMAGE",),
                 "provider_json": ("STRING", {"multiline": True, "default": ""}),
                 "extra_body_json": ("STRING", {"multiline": True, "default": ""}),
             },
@@ -247,13 +248,19 @@ class OpenRouterText:
         max_tokens,
         seed,
         api_key,
+        reference_image=None,
         provider_json="",
         extra_body_json="",
     ):
         messages = []
         if system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        if reference_image is not None:
+            content = [{"type": "text", "text": prompt}]
+            content.extend(_image_reference_payloads(reference_image, "png"))
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         payload = {
             "model": model,
@@ -382,6 +389,7 @@ class OpenRouterVideo:
                 "resolution": ("STRING", {"default": "720p"}),
                 "aspect_ratio": ("STRING", {"default": "16:9"}),
                 "duration": ("INT", {"default": 5, "min": 1, "max": 60}),
+                "audio_mode": (["auto", "on", "off"], {"default": "auto"}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
                 "poll_interval_seconds": ("INT", {"default": 5, "min": 1, "max": 60}),
                 "api_key": ("STRING", {"default": "", "password": True}),
@@ -405,6 +413,7 @@ class OpenRouterVideo:
         resolution,
         aspect_ratio,
         duration,
+        audio_mode,
         seed,
         poll_interval_seconds,
         api_key,
@@ -419,6 +428,10 @@ class OpenRouterVideo:
             "aspect_ratio": aspect_ratio,
             "duration": duration,
         }
+        if audio_mode != "auto":
+            payload["generate_audio"] = audio_mode != "off"
+        if seed >= 0:
+            payload["seed"] = seed
         if first_frame_image is not None:
             references = _image_reference_payloads(first_frame_image, "png")
             payload["frame_images"] = [
